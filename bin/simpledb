@@ -1,7 +1,13 @@
-#!/usr/bin/perl -wT
+#!/usr/bin/perl -T
+
 use strict;
+use warnings;
+use feature 'say';
+use Data::Dumper;
+use URI;
 
 binmode(STDOUT => ':encoding(utf8)');
+
 
 =head1 NAME
 
@@ -65,6 +71,7 @@ SimpleDB (SDB) actions.
 
   export AWS_ACCESS_KEY_ID=...
   export AWS_SECRET_ACCESS_KEY=...
+  export SDB-SERVICE-URL=https://sdb.eu-west-1.amazonaws.com
 
 # Create a new SimpleDB domain:
 
@@ -96,9 +103,9 @@ SimpleDB (SDB) actions.
 
   simpledb delete mydomain item2 who=you
 
-# List all item names in a domain
+# List all item names in a domain  - note backquotes around domain
 
-  simpledb select 'select itemName() from mydomain'
+  simpledb select 'select itemName() from `my-domain`'
 
 # List all items and their attributes matching a given select query:
 
@@ -121,23 +128,28 @@ SimpleDB (SDB) actions.
 =head1 ENVIRONMENT
 
  AWS_ACCESS_KEY_ID
-                Default AWS access key id
+      Default AWS access key id
 
  AWS_SECRET_ACCESS_KEY
-                Default AWS secret access key
+      Default AWS secret access key
+
+ SDB_SERVICE_URL
+      Default https://sdb.amazonaws.com/
+      Alternatives:
+  http://docs.aws.amazon.com/general/latest/gr/rande.html#sdb_region
 
 =head1 FILES
 
  $HOME/.awssecret
-		If the above fail, then the keys are sought here in the
-		format expected by the "aws" toolkit (one per line):
-			access_key_id
-			secret_access_key
+    If the above fail, then the keys are sought here in the
+    format expected by the "aws" toolkit (one per line):
+      access_key_id
+      secret_access_key
 
  /etc/passwd-s3fs
-		If all of the above fail, then the keys are sought
-		here in the format expected by s3fs (colon separated):
-			access_key_id:secret_access_key
+    If all of the above fail, then the keys are sought
+    here in the format expected by s3fs (colon separated):
+      access_key_id:secret_access_key
 
 =head1 INSTALLATION
 
@@ -234,7 +246,7 @@ BEGIN { # Extract path and program name.
 
 use Getopt::Long;
 use Pod::Usage;
-use Amazon::SimpleDB::Client;
+use SimpleDB::Client;
 use List::Util qw(min);
 
 my %METHODS = (
@@ -251,9 +263,7 @@ my %METHODS = (
 my $help        = 0;
 my $aws_access_key_id     = $ENV{AWS_ACCESS_KEY_ID};
 my $aws_secret_access_key = $ENV{AWS_SECRET_ACCESS_KEY};
-my $http_proxy_host       = $ENV{HTTP_PROXY_HOST};
-my $http_proxy_port       = $ENV{HTTP_PROXY_PORT};
-my $sdb_service_url       = $ENV{SDB_SERVICE_URL};
+my $sdb_service_url       = $ENV{SDB_SERVICE_URL} || 'https://sdb.amazonaws.com/';
 my $replace               = 0;
 my $max                   = undef;
 my $separator             = '=';
@@ -263,8 +273,6 @@ GetOptions(
            'help|?'                  => \$help,
            'aws-access-key-id=s'     => \$aws_access_key_id,
            'aws-secret-access-key=s' => \$aws_secret_access_key,
-           'http-proxy-host=s'       => \$http_proxy_host,
-           'http-proxy-port=s'       => \$http_proxy_port,
            'sdb-service-url=s'       => \$sdb_service_url,
            'replace'                 => \$replace,
            'max=s'                   => \$max,
@@ -291,14 +299,11 @@ die "$prog: ERROR: Specify --aws-access-key-id and --aws-secret-access-key\n"
   unless $aws_access_key_id and $aws_secret_access_key;
 
 my $connection_params = {};
-defined $sdb_service_url and $connection_params->{ServiceURL} = $sdb_service_url;
-defined $http_proxy_host and $connection_params->{ProxyHost} = $http_proxy_host;
-defined $http_proxy_port and $connection_params->{ProxyPort} = $http_proxy_port;
 
-my $sdb = Amazon::SimpleDB::Client->new(
-  $aws_access_key_id,
-  $aws_secret_access_key,
-  $connection_params
+my $sdb = SimpleDB::Client->new(
+  access_key   => $aws_access_key_id,
+  secret_key   => $aws_secret_access_key,
+  simpledb_uri => URI->new($sdb_service_url),
 );
 
 my $command = shift(@ARGV) || pod2usage(1);
@@ -306,16 +311,14 @@ my $method = $METHODS{$command}
   || die "$prog: Unrecognized command: $command\n";
 
 eval { &$method($sdb, @ARGV); };
-error("$prog: ERROR: Running '$command @ARGV':", $@) if $@;
+say STDERR ("$prog: ERROR: Running '$command @ARGV':".$@) if $@;
 
 exit 0;
 
 sub create_domain {
   my ($sdb, $domain_name) = @_;
 
-  my $response = $sdb->createDomain({
-    DomainName => $domain_name,
-  });
+  $sdb->send_request('CreateDomain', {DomainName => $domain_name});
 }
 
 sub list_domains {
@@ -325,18 +328,49 @@ sub list_domains {
   my $next_token;
   my $remaining = $max;
   do {
-    my $response = $sdb->listDomains({
-      ($next_token        ? (NextToken        => $next_token)          : ()),
-      (defined $remaining ? (MaxNumberOfItems => min($remaining, 250)) : ()),
-    });
+    my $rh_params = {};
+    $rh_params->{NextToken} = $next_token if ($next_token);
+    $rh_params->{MaxNumberOfDomains} = min($remaining, 250) if ($remaining);
 
-    my $domain_name_list = $response->getListDomainsResult->getDomainName;
+    my $response = $sdb->send_request('ListDomains',  $rh_params);
+    my $domain_name_list = $response->{ListDomainsResult}->{DomainName};
     print defined $_ ? "$_\n" : '' for @$domain_name_list;
-    $next_token = $response->getListDomainsResult->getNextToken;
+    $next_token = $response->{ListDomainsResult}->{NextToken};
     $remaining -= scalar @$domain_name_list if defined $remaining;
   } while ( $next_token and (not defined $remaining or $remaining > 0));
 }
 
+sub select {
+  my ($sdb, $select_expression) = @_;
+
+say STDERR '$select_expression = ' . $select_expression;
+
+  return if defined $max and $max <= 0;
+  my $next_token;
+  my $remaining = $max;
+  do {
+    my $response = $sdb->send_request('Select',{
+      SelectExpression                 => $select_expression,
+      ($next_token        ? (NextToken        => $next_token)          : ()),
+      (defined $remaining ? (MaxNumberOfItems => min($remaining, 250)) : ()),
+    });
+
+    my $item_list = $response->{SelectResult}->{Item};
+say Dumper $item_list;
+return;
+    for my $item ( @$item_list ) {
+      print $item->getName ? ($item->getName, "\n") : '';
+      my $attribute_list = $item->getAttribute;
+      print $_->getName ? (' ', $_->getName, $separator, $_->getValue, "\n") : ''
+        for @$attribute_list;
+    }
+
+    $next_token = $response->getSelectResult->getNextToken;
+    $remaining -= scalar @$item_list if defined $remaining;
+  } while ( $next_token and (not defined $remaining or $remaining > 0));
+}
+
+=head2 
 sub delete_domain {
   my ($sdb, $domain_name) = @_;
 
@@ -387,31 +421,6 @@ sub get_attributes {
     for @$attribute_list;
 }
 
-sub select {
-  my ($sdb, $select_expression) = @_;
-
-  return if defined $max and $max <= 0;
-  my $next_token;
-  my $remaining = $max;
-  do {
-    my $response = $sdb->select({
-      SelectExpression                 => $select_expression,
-      ($next_token        ? (NextToken        => $next_token)          : ()),
-      (defined $remaining ? (MaxNumberOfItems => min($remaining, 250)) : ()),
-    });
-
-    my $item_list = $response->getSelectResult->getItem;
-    for my $item ( @$item_list ) {
-      print $item->getName ? ($item->getName, "\n") : '';
-      my $attribute_list = $item->getAttribute;
-      print $_->getName ? (' ', $_->getName, $separator, $_->getValue, "\n") : ''
-        for @$attribute_list;
-    }
-
-    $next_token = $response->getSelectResult->getNextToken;
-    $remaining -= scalar @$item_list if defined $remaining;
-  } while ( $next_token and (not defined $remaining or $remaining > 0));
-}
 
 sub pairs_to_attributes {
   my ($pairs, $with_replace) = @_;
@@ -428,13 +437,4 @@ sub pairs_to_attributes {
   return \@attributes;
 }
 
-sub error {
-  my ($message, $exception) = @_;
-
-  if ( ref $exception eq "Amazon::SimpleDB::Exception" ) {
-    $message .= " ".$exception->getMessage()."\n";
-  } else {
-    $message .= " $@\n";
-  }
-  die $message;
-}
+=cut
