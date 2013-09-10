@@ -71,7 +71,7 @@ SimpleDB (SDB) actions.
 
   export AWS_ACCESS_KEY_ID=...
   export AWS_SECRET_ACCESS_KEY=...
-  export SDB-SERVICE-URL=https://sdb.eu-west-1.amazonaws.com
+  export SDB_SERVICE_URL=https://sdb.eu-west-1.amazonaws.com
 
 # Create a new SimpleDB domain:
 
@@ -343,8 +343,6 @@ sub list_domains {
 sub select {
   my ($sdb, $select_expression) = @_;
 
-say STDERR '$select_expression = ' . $select_expression;
-
   return if defined $max and $max <= 0;
   my $next_token;
   my $remaining = $max;
@@ -356,38 +354,37 @@ say STDERR '$select_expression = ' . $select_expression;
     });
 
     my $item_list = $response->{SelectResult}->{Item};
-say Dumper $item_list;
-return;
     for my $item ( @$item_list ) {
-      print $item->getName ? ($item->getName, "\n") : '';
-      my $attribute_list = $item->getAttribute;
-      print $_->getName ? (' ', $_->getName, $separator, $_->getValue, "\n") : ''
+      print $item->{Name} ? ($item->{Name}, "\n") : '';
+      my $attribute_list = $item->{Attribute};
+      print $_->{Name} ? (' ', $_->{Name}, $separator, $_->{Value}, "\n") : ''
         for @$attribute_list;
     }
 
-    $next_token = $response->getSelectResult->getNextToken;
+    $next_token = $response->{SelectResult}->{NextToken};
     $remaining -= scalar @$item_list if defined $remaining;
   } while ( $next_token and (not defined $remaining or $remaining > 0));
 }
 
-=head2 
 sub delete_domain {
   my ($sdb, $domain_name) = @_;
 
-  my $response = $sdb->deleteDomain({
+  my $response = $sdb->send_request('DeleteDomain',{
     DomainName => $domain_name,
   });
 }
+
 
 sub put_replace_attributes {
   $replace = 1;
   goto &put_attributes;
 }
 
+
 sub put_attributes {
   my ($sdb, $domain_name, $item_name, @pairs) = @_;
 
-  my $response = $sdb->putAttributes({
+  my $response = $sdb->send_request('PutAttributes',{
     DomainName => $domain_name,
     ItemName   => $item_name,
     Attribute  => pairs_to_attributes(\@pairs, 1),
@@ -398,7 +395,7 @@ sub delete_attributes {
   my ($sdb, $domain_name, $item_name, @pairs) = @_;
 
   my $response = eval {
-    $sdb->deleteAttributes({
+    $sdb->send_request('DeleteAttributes', {
       DomainName => $domain_name,
       ItemName   => $item_name,
       Attribute  => pairs_to_attributes(\@pairs, 0),
@@ -406,18 +403,19 @@ sub delete_attributes {
   };
 }
 
+
 sub get_attributes {
   my ($sdb, $domain_name, $item_name, @attribute_names) = @_;
 
-  my $response = $sdb->getAttributes({
+  my $response = $sdb->send_request('GetAttributes', {
     DomainName => $domain_name,
     ItemName => $item_name,
     DomainName => $domain_name,
     ItemName   => $item_name,
     AttributeName => \@attribute_names,
   });
-  my $attribute_list = $response->getGetAttributesResult->getAttribute;
-  print $_->getName ? ($_->getName, $separator, $_->getValue, "\n") : ''
+  my $attribute_list = $response->{GetAttributesResult}->{Attribute};
+  print $_->{Name}? ($_->{Name}, $separator, $_->{Value}, "\n") : ''
     for @$attribute_list;
 }
 
@@ -437,4 +435,3 @@ sub pairs_to_attributes {
   return \@attributes;
 }
 
-=cut
