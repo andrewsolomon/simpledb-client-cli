@@ -3,7 +3,6 @@
 use strict;
 use warnings;
 use feature 'say';
-use Data::Dumper;
 use URI;
 
 binmode(STDOUT => ':encoding(utf8)');
@@ -21,7 +20,7 @@ simpledb - Amazon SimpleDB command line interface
 
  simpledb [opts] put         DOMAIN ITEM [NAME=VALUE]...
  simpledb [opts] put-replace DOMAIN ITEM [NAME=VALUE]...
- simpledb [opts] get         DOMAIN ITEM [NAME]...
+ simpledb [opts] get         DOMAIN ITEM
  simpledb [opts] delete      DOMAIN ITEM [NAME[=VALUE]]...
 
  simpledb [opts] select SELECTEXPRESSION
@@ -34,7 +33,9 @@ simpledb - Amazon SimpleDB command line interface
 
  --http-proxy-port
 
- --sdb-service-url
+ --sdb-service-url URL
+      Defaults to https://sdb.amazonaws.com/
+      Alternatives: http://docs.aws.amazon.com/general/latest/gr/rande.html#sdb_region
 
  --aws-access-key-id KEY
                 AWS access key id
@@ -117,10 +118,6 @@ SimpleDB (SDB) actions.
 
   simpledb get mydomain item2
 
-# List specific attributes on an item:
-
-  simpledb get mydomain item2 key2 y
-
 # Delete the entire SimpleDB domain including all items and attributes:
 
   simpledb delete-domain mydomain
@@ -151,56 +148,6 @@ SimpleDB (SDB) actions.
     here in the format expected by s3fs (colon separated):
       access_key_id:secret_access_key
 
-=head1 INSTALLATION
-
-BEWARE! The installation of dependencies is somewhat messy with this
-release and may require some understanding of how Perl works!
-
-This tool depends on the following Perl modules from CPAN:
-
-  Getopt::Long
-  Pod::Usage
-  Digest::SHA1
-  Digest::HMAC
-  XML::Simple
-
-You can install them using the "cpan" command on many Linux distros:
-
-  sudo cpan Getopt::Long Pod::Usage Digest::SHA1 Digest::HMAC XML::Simple
-
-This tool also depends on the Amazon::SDB modules provided by Amazon
-(not the one in CPAN).  Amazon's modules can be found here:
-
-  http://developer.amazonwebservices.com/connect/entry.jspa?externalID=1136
-
-Here is how I installed them.
-
-  curl -Lo amazon-simpledb-perl-library.zip \
-    http://amazon-simpledb-perl-library.notlong.com
-
-  unzip amazon-simpledb-perl-library.zip
-
-  sitelib=$(perl -MConfig -le 'print $Config{sitelib}')
-  sudo scp -r AmazonSimpleDB-*-perl-library/src/Amazon $sitelib
-
-Finally, this command line interface can be installed with:
-
-  sudo curl -Lo /usr/local/bin/simpledb http://simpledb-cli.notlong.com
-  sudo chmod +x /usr/local/bin/simpledb
-
-=head1 SEE ALSO
-
-Latest versions of this script available from the Google Code project:
-http://code.google.com/p/amazon-simpledb-cli/
-
-Amazon SimpleDB (SDB)
-http://www.amazon.com/SimpleDB-AWS-Service-Pricing/b/?node=342335011
-
-Amazon SimpleDB Developer Guide
-http://docs.amazonwebservices.com/AmazonSimpleDB/2007-11-07/DeveloperGuide/
-
-sdbShell (another SimpleDB command line interface by David Kavanagh)
-http://code.google.com/p/typica/
 
 =head1 CAVEATS
 
@@ -210,6 +157,11 @@ signs (=).
 Output will be difficult to parse if the values contain newlines.
 
 =head1 HISTORY
+
+ 2013-09-11 Andrew Solomon <andrew at illywhacker dot net>
+ - Rebased on SimpleDB::Client
+ - Removed proxying
+ - Removed attribute parameters from "get"
 
  2010-04-20 Eric Hammond <ehammond@thinksome.com>
  - Removed support for "query".  Please migrate to "select"
@@ -387,7 +339,7 @@ sub put_attributes {
   my $response = $sdb->send_request('PutAttributes',{
     DomainName => $domain_name,
     ItemName   => $item_name,
-    Attribute  => pairs_to_attributes(\@pairs, 1),
+    %{pairs_to_attributes(\@pairs, 1)},
   });
 }
 
@@ -398,7 +350,7 @@ sub delete_attributes {
     $sdb->send_request('DeleteAttributes', {
       DomainName => $domain_name,
       ItemName   => $item_name,
-      Attribute  => pairs_to_attributes(\@pairs, 0),
+      %{pairs_to_attributes(\@pairs, 0)},
     });
   };
 }
@@ -407,14 +359,20 @@ sub delete_attributes {
 sub get_attributes {
   my ($sdb, $domain_name, $item_name, @attribute_names) = @_;
 
+  my %attr_param;
+  for (my $i=1; $i <= scalar(@attribute_names); $i++) {
+    $attr_param{"AttributeName.$i"} = $attribute_names[$i-1];
+  }
   my $response = $sdb->send_request('GetAttributes', {
     DomainName => $domain_name,
     ItemName => $item_name,
-    DomainName => $domain_name,
-    ItemName   => $item_name,
-    AttributeName => \@attribute_names,
+    %attr_param
   });
-  my $attribute_list = $response->{GetAttributesResult}->{Attribute};
+  return unless $response->{GetAttributesResult} && ref($response->{GetAttributesResult}) ;
+
+  my $attribute_list = ref($response->{GetAttributesResult}->{Attribute}) eq 'ARRAY' ?
+    $response->{GetAttributesResult}->{Attribute} : [$response->{GetAttributesResult}->{Attribute}];
+
   print $_->{Name}? ($_->{Name}, $separator, $_->{Value}, "\n") : ''
     for @$attribute_list;
 }
@@ -423,15 +381,17 @@ sub get_attributes {
 sub pairs_to_attributes {
   my ($pairs, $with_replace) = @_;
 
-  my @attributes = ();
-  for my $pair ( @$pairs ) {
+  my %attributes = ();
+  for (my $i = 1; $i <= scalar(@$pairs); $i++) {
+    my $pair = $pairs->[$i-1];
     my ($name, $value) = split(/$separator/, $pair, 2);
-    push @attributes, {
-      Name                      => $name,
-      Value                     => $value,
-      ($with_replace ? (Replace => $replace ? 'true' : '') : ()),
-    };
+    my $prefix = "Attribute.$i.";
+    $attributes{"${prefix}Name"}  = $name;
+    $attributes{"${prefix}Value"} = $value;
+    if ($with_replace && $replace) {
+      $attributes{"${prefix}Replace"} = 'true';
+    }
   }
-  return \@attributes;
+  return \%attributes;
 }
 
